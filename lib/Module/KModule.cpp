@@ -29,9 +29,12 @@
 #include "llvm/IR/DataLayout.h"
 
 #if LLVM_VERSION_CODE < LLVM_VERSION(3, 5)
+#include "llvm/Analysis/Verifier.h"
+#include "llvm/Linker.h"
 #include "llvm/Support/CallSite.h"
 #else
 #include "llvm/IR/CallSite.h"
+#include "llvm/Linker/Linker.h"
 #endif
 
 #include "klee/Internal/Module/LLVMPassManager.h"
@@ -81,12 +84,8 @@ namespace {
                               cl::desc("Print functions whose address is taken."));
 }
 
-KModule::KModule(Module *_module) 
-  : module(_module),
-    targetData(new DataLayout(module)),
-    infos(0),
-    constantTable(0) {
-}
+KModule::KModule()
+    : module(nullptr), targetData(nullptr), infos(0), constantTable(0) {}
 
 KModule::~KModule() {
   delete[] constantTable;
@@ -99,15 +98,12 @@ KModule::~KModule() {
   for (std::map<const llvm::Constant*, KConstant*>::iterator it=constantMap.begin(),
       itE=constantMap.end(); it!=itE;++it)
     delete it->second;
-
-  delete targetData;
-  delete module;
 }
 
 /***/
 
 namespace llvm {
-extern void Optimize(Module *, const std::string &EntryPoint);
+extern void Optimize(Module *, llvm::ArrayRef<const char *> preservedFunctions);
 }
 
 // what a hack
@@ -194,14 +190,32 @@ void KModule::addInternalFunction(const char* functionName){
   internalFunctions.insert(internalFunction);
 }
 
-void KModule::prepare(const Interpreter::ModuleOptions &opts,
-                      InterpreterHandler *ih) {
+bool KModule::link(std::vector<std::unique_ptr<llvm::Module> > &modules,
+                   const Interpreter::ModuleOptions &opts,
+                   InterpreterHandler *ih) {
+  auto numRemainingModules = modules.size();
+  // Add the currently active module to the list of linkables
+  modules.push_back(std::move(module));
+  std::string error;
+  module = std::unique_ptr<llvm::Module>(
+      klee::linkModules(modules, opts.EntryPoint, error));
+  if (!module)
+    klee_error("Could not link KLEE files %s", error.c_str());
+
+  targetData = std::unique_ptr<llvm::DataLayout>(new DataLayout(module.get()));
+
+  // Check if we linked anything
+  return modules.size() != numRemainingModules;
+}
+
+void KModule::instrument(const Interpreter::ModuleOptions &opts) {
   // Inject checks prior to optimization... we also perform the
   // invariant transformations that we will end up doing later so that
   // optimize is seeing what is as close as possible to the final
   // module.
   LegacyLLVMPassManagerTy pm;
   pm.add(new RaiseAsmPass());
+
   // This pass will scalarize as much code as possible so that the Executor
   // does not need to handle operands of vector type for most instructions
   // other than InsertElementInst and ExtractElementInst.
@@ -214,21 +228,13 @@ void KModule::prepare(const Interpreter::ModuleOptions &opts,
 
   pm.add(new IntrinsicCleanerPass(*targetData));
   pm.run(*module);
+}
 
+void KModule::optimiseAndPrepare(
+    const Interpreter::ModuleOptions &opts, InterpreterHandler *ih,
+    llvm::ArrayRef<const char *> preservedFunctions) {
   if (opts.Optimize)
-    Optimize(module, opts.EntryPoint);
-
-  // FIXME: Missing force import for various math functions.
-
-  // FIXME: Find a way that we can test programs without requiring
-  // this to be linked in, it makes low level debugging much more
-  // annoying.
-
-  SmallString<128> LibPath(opts.LibraryDir);
-  llvm::sys::path::append(LibPath,
-      "kleeRuntimeIntrinsic.bc"
-    );
-  module = linkWithLibrary(module, LibPath.str());
+    Optimize(module.get(), preservedFunctions);
 
   // Add internal functions which are not used to check if instructions
   // have been already visited
@@ -237,10 +243,9 @@ void KModule::prepare(const Interpreter::ModuleOptions &opts,
   if (opts.CheckOvershift)
     addInternalFunction("klee_overshift_check");
 
-
   // Needs to happen after linking (since ctors/dtors can be modified)
   // and optimization (since global optimization can rewrite lists).
-  injectStaticConstructorsAndDestructors(module);
+  injectStaticConstructorsAndDestructors(module.get());
 
   // Finally, run the passes that maintain invariants we expect during
   // interpretation. We run the intrinsic cleaner just in case we
@@ -268,8 +273,10 @@ void KModule::prepare(const Interpreter::ModuleOptions &opts,
   if (!operandTypeCheckPass->checkPassed()) {
     klee_error("Unexpected instruction operand types detected");
   }
+}
 
-  if (OutputSource) {
+void KModule::manifest(InterpreterHandler *ih, bool forceSourceOutput) {
+  if (OutputSource || forceSourceOutput) {
     std::unique_ptr<llvm::raw_fd_ostream> os(ih->openOutputFile("assembly.ll"));
     assert(os && !os->has_error() && "unable to open source output");
     *os << *module;
@@ -277,14 +284,14 @@ void KModule::prepare(const Interpreter::ModuleOptions &opts,
 
   if (OutputModule) {
     llvm::raw_fd_ostream *f = ih->openOutputFile("final.bc");
-    WriteBitcodeToFile(module, *f);
+    WriteBitcodeToFile(module.get(), *f);
     delete f;
   }
 
   /* Build shadow structures */
 
-  infos = new InstructionInfoTable(module);  
-  
+  infos = new InstructionInfoTable(module.get());
+
   for (Module::iterator it = module->begin(), ie = module->end();
        it != ie; ++it) {
     if (it->isDeclaration())
@@ -292,7 +299,7 @@ void KModule::prepare(const Interpreter::ModuleOptions &opts,
 
     Function *fn = &*it;
     KFunction *kf = new KFunction(fn, this);
-    
+
     for (unsigned i=0; i<kf->numInstructions; ++i) {
       KInstruction *ki = kf->instructions[i];
       ki->info = &infos->getInfo(ki->inst);
@@ -304,8 +311,9 @@ void KModule::prepare(const Interpreter::ModuleOptions &opts,
 
   /* Compute various interesting properties */
 
-  for (std::vector<KFunction*>::iterator it = functions.begin(), 
-         ie = functions.end(); it != ie; ++it) {
+  for (std::vector<KFunction *>::iterator it = functions.begin(),
+                                          ie = functions.end();
+       it != ie; ++it) {
     KFunction *kf = *it;
     if (functionEscapes(kf->function))
       escapingFunctions.insert(kf->function);
@@ -313,8 +321,9 @@ void KModule::prepare(const Interpreter::ModuleOptions &opts,
 
   if (DebugPrintEscapingFunctions && !escapingFunctions.empty()) {
     llvm::errs() << "KLEE: escaping functions: [";
-    for (std::set<Function*>::iterator it = escapingFunctions.begin(), 
-         ie = escapingFunctions.end(); it != ie; ++it) {
+    for (std::set<Function *>::iterator it = escapingFunctions.begin(),
+                                        ie = escapingFunctions.end();
+         it != ie; ++it) {
       llvm::errs() << (*it)->getName() << ", ";
     }
     llvm::errs() << "]\n";
