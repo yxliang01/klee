@@ -218,7 +218,7 @@ klee::linkModules(std::vector<std::unique_ptr<llvm::Module> > &modules,
   // fail if not found
   if (!composite) {
     errorMsg = "'" + entryFunction.str() + "' function not found in module.";
-    return false;
+    return nullptr;
   }
 
   while (1) {
