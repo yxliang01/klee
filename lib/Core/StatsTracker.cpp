@@ -215,9 +215,8 @@ StatsTracker::StatsTracker(Executor &_executor, std::string _objectFilename,
   if (OutputIStats)
     theStatisticManager->useIndexedStats(km->infos->getMaxID());
 
-  for (std::vector<KFunction*>::iterator it = km->functions.begin(), 
-         ie = km->functions.end(); it != ie; ++it) {
-    KFunction *kf = *it;
+  for (auto &kfp : km->functions) {
+    KFunction *kf = kfp.get();
     kf->trackCoverage = 1;
 
     for (unsigned i=0; i<kf->numInstructions; ++i) {

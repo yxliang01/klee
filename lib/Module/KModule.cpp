@@ -84,22 +84,6 @@ namespace {
                               cl::desc("Print functions whose address is taken."));
 }
 
-KModule::KModule()
-    : module(nullptr), targetData(nullptr), infos(0), constantTable(0) {}
-
-KModule::~KModule() {
-  delete[] constantTable;
-  delete infos;
-
-  for (std::vector<KFunction*>::iterator it = functions.begin(), 
-         ie = functions.end(); it != ie; ++it)
-    delete *it;
-
-  for (std::map<const llvm::Constant*, KConstant*>::iterator it=constantMap.begin(),
-      itE=constantMap.end(); it!=itE;++it)
-    delete it->second;
-}
-
 /***/
 
 namespace llvm {
@@ -283,68 +267,59 @@ void KModule::manifest(InterpreterHandler *ih, bool forceSourceOutput) {
   }
 
   if (OutputModule) {
-    llvm::raw_fd_ostream *f = ih->openOutputFile("final.bc");
+    std::unique_ptr<llvm::raw_fd_ostream> f(ih->openOutputFile("final.bc"));
     WriteBitcodeToFile(module.get(), *f);
-    delete f;
   }
 
   /* Build shadow structures */
 
-  infos = new InstructionInfoTable(module.get());
+  infos = std::unique_ptr<InstructionInfoTable>(
+      new InstructionInfoTable(module.get()));
 
-  for (Module::iterator it = module->begin(), ie = module->end();
-       it != ie; ++it) {
-    if (it->isDeclaration())
+  for (auto &Function : *module) {
+    if (Function.isDeclaration())
       continue;
 
-    Function *fn = &*it;
-    KFunction *kf = new KFunction(fn, this);
+    auto kf = std::unique_ptr<KFunction>(new KFunction(&Function, this));
 
     for (unsigned i=0; i<kf->numInstructions; ++i) {
       KInstruction *ki = kf->instructions[i];
       ki->info = &infos->getInfo(ki->inst);
     }
 
-    functions.push_back(kf);
-    functionMap.insert(std::make_pair(fn, kf));
+    functionMap.insert(std::make_pair(&Function, kf.get()));
+    functions.push_back(std::move(kf));
   }
 
   /* Compute various interesting properties */
 
-  for (std::vector<KFunction *>::iterator it = functions.begin(),
-                                          ie = functions.end();
-       it != ie; ++it) {
-    KFunction *kf = *it;
+  for (auto &kf : functions) {
     if (functionEscapes(kf->function))
       escapingFunctions.insert(kf->function);
   }
 
   if (DebugPrintEscapingFunctions && !escapingFunctions.empty()) {
     llvm::errs() << "KLEE: escaping functions: [";
-    for (std::set<Function *>::iterator it = escapingFunctions.begin(),
-                                        ie = escapingFunctions.end();
-         it != ie; ++it) {
-      llvm::errs() << (*it)->getName() << ", ";
-    }
+    for (auto &Function : escapingFunctions)
+      llvm::errs() << Function->getName() << ", ";
     llvm::errs() << "]\n";
   }
 }
 
 KConstant* KModule::getKConstant(const Constant *c) {
-  std::map<const llvm::Constant*, KConstant*>::iterator it = constantMap.find(c);
+  auto it = constantMap.find(c);
   if (it != constantMap.end())
-    return it->second;
+    return it->second.get();
   return NULL;
 }
 
 unsigned KModule::getConstantID(Constant *c, KInstruction* ki) {
-  KConstant *kc = getKConstant(c);
-  if (kc)
+  if (KConstant *kc = getKConstant(c))
     return kc->id;  
 
   unsigned id = constants.size();
-  kc = new KConstant(c, id, ki);
-  constantMap.insert(std::make_pair(c, kc));
+  auto kc = std::unique_ptr<KConstant>(new KConstant(c, id, ki));
+  constantMap.insert(std::make_pair(c, std::move(kc)));
   constants.push_back(c);
   return id;
 }
@@ -388,11 +363,10 @@ KFunction::KFunction(llvm::Function *_function,
     numArgs(function->arg_size()),
     numInstructions(0),
     trackCoverage(true) {
-  for (llvm::Function::iterator bbit = function->begin(), 
-         bbie = function->end(); bbit != bbie; ++bbit) {
-    BasicBlock *bb = &*bbit;
-    basicBlockEntry[bb] = numInstructions;
-    numInstructions += bb->size();
+  // Assign unique instruction IDs to each basic block
+  for (auto &BasicBlock : *function) {
+    basicBlockEntry[&BasicBlock] = numInstructions;
+    numInstructions += BasicBlock.size();
   }
 
   instructions = new KInstruction*[numInstructions];

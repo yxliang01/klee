@@ -821,7 +821,7 @@ static const char *unsafeExternals[] = {
   "kill", // mmmhmmm
 };
 #define NELEMS(array) (sizeof(array)/sizeof(array[0]))
-void externalsAndGlobalsCheck(llvm::Module *m) {
+void externalsAndGlobalsCheck(const llvm::Module *m) {
   std::map<std::string, bool> externals;
   std::set<std::string> modelled(modelledExternals,
                                  modelledExternals+NELEMS(modelledExternals));
@@ -1021,13 +1021,10 @@ createLibCWrapper(std::vector<std::unique_ptr<llvm::Module> > &modules,
   if (!uclibcMainFn)
     klee_error("Could not add __uClibc_main wrapper");
 
-  // XXX get or create function to be called
-
   auto inModuleRefernce = uclibcMainFn->getParent()->getOrInsertFunction(
       userMainFn->getName(), userMainFn->getFunctionType());
 
   const auto ft = uclibcMainFn->getFunctionType();
-  assert(ft->getNumParams() == 7);
 
   if (ft->getNumParams() != 7)
     klee_error("Imported __uClibc_main wrapper does not have the correct "
@@ -1071,57 +1068,7 @@ linkWithUclibc(StringRef libDir,
     klee_error("Cannot find klee-uclibc '%s': %s", uclibcBCA.c_str(),
                errorMsg.c_str());
 
-  //  // force various imports
-  //  if (WithPOSIXRuntime) {
-  //    llvm::Type *i8Ty = Type::getInt8Ty(ctx);
-  //    mainModule->getOrInsertFunction("realpath",
-  //                                    PointerType::getUnqual(i8Ty),
-  //                                    PointerType::getUnqual(i8Ty),
-  //                                    PointerType::getUnqual(i8Ty),
-  //                                    NULL);
-  //    mainModule->getOrInsertFunction("getutent",
-  //                                    PointerType::getUnqual(i8Ty),
-  //                                    NULL);
-  //    mainModule->getOrInsertFunction("__fgetc_unlocked",
-  //                                    Type::getInt32Ty(ctx),
-  //                                    PointerType::getUnqual(i8Ty),
-  //                                    NULL);
-  //    mainModule->getOrInsertFunction("__fputc_unlocked",
-  //                                    Type::getInt32Ty(ctx),
-  //                                    Type::getInt32Ty(ctx),
-  //                                    PointerType::getUnqual(i8Ty),
-  //                                    NULL);
-  //  }
-
   for (auto i = newModules, j = modules.size(); i < j; ++i) {
-    // Replace "MB_CUR_MAX" with the ctype version
-    auto f = modules[i]->getFunction("__ctype_get_mb_cur_max");
-    if (f)
-      f->setName("_stdlib_mb_cur_max");
-
-    // Strip of asm prefixes for 64 bit versions because they are not
-    // present in uclibc and we want to make sure stuff will get
-    // linked. In the off chance that both prefixed and unprefixed
-    // versions are present in the module, make sure we don't create a
-    // naming conflict.
-    for (auto it = modules[i]->begin(), itE = modules[i]->end(); it != itE;
-         ++it) {
-      Function *f = &*it;
-      llvm::StringRef name(f->getName());
-      if (name[0] != '\01')
-        continue;
-      if (!name.endswith("64"))
-        continue;
-      auto trimmedName = name.drop_back(2).drop_front(1);
-      // Check if the unprefixed version exists.
-      if (Function *f2 = modules[i]->getFunction(trimmedName)) {
-        f->replaceAllUsesWith(f2);
-        f->eraseFromParent();
-      } else {
-        f->setName(trimmedName);
-      }
-    }
-
     replaceOrRenameFunction(modules[i].get(), "__libc_open", "open");
     replaceOrRenameFunction(modules[i].get(), "__libc_fcntl", "fcntl");
   }
@@ -1275,8 +1222,8 @@ int main(int argc, char **argv, char **envp) {
   }
 
   for (const auto &library : LinkLibraries) {
-    if (!klee::loadFile(library.c_str(), mainModule->getContext(),
-                        loadedModules, errorMsg))
+    if (!klee::loadFile(library, mainModule->getContext(), loadedModules,
+                        errorMsg))
       klee_error("error loading free standing support '%s': %s",
                  library.c_str(), errorMsg.c_str());
   }

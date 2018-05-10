@@ -53,12 +53,11 @@ namespace klee {
     /// "coverable" for statistics and search heuristics.
     bool trackCoverage;
 
-  private:
-    KFunction(const KFunction&);
-    KFunction &operator=(const KFunction&);
-
   public:
     explicit KFunction(llvm::Function*, KModule *);
+    KFunction(const KFunction &) = delete;
+    KFunction &operator=(const KFunction &) = delete;
+
     ~KFunction();
 
     unsigned getArgRegister(unsigned index) { return index; }
@@ -87,20 +86,20 @@ namespace klee {
     std::unique_ptr<llvm::DataLayout> targetData;
 
     // Our shadow versions of LLVM structures.
-    std::vector<KFunction*> functions;
+    std::vector<std::unique_ptr<KFunction> > functions;
     std::map<llvm::Function*, KFunction*> functionMap;
 
     // Functions which escape (may be called indirectly)
     // XXX change to KFunction
     std::set<llvm::Function*> escapingFunctions;
 
-    InstructionInfoTable *infos;
+    std::unique_ptr<InstructionInfoTable> infos;
 
     std::vector<llvm::Constant*> constants;
-    std::map<const llvm::Constant*, KConstant*> constantMap;
+    std::map<const llvm::Constant *, std::unique_ptr<KConstant> > constantMap;
     KConstant* getKConstant(const llvm::Constant *c);
 
-    Cell *constantTable;
+    std::unique_ptr<Cell[]> constantTable;
 
     // Functions which are part of KLEE runtime
     std::set<const llvm::Function*> internalFunctions;
@@ -110,8 +109,7 @@ namespace klee {
     void addInternalFunction(const char* functionName);
 
   public:
-    KModule();
-    ~KModule();
+    KModule() = default;
 
     /// Optimise and prepare module such that KLEE can execute it
     //

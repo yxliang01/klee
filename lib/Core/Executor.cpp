@@ -2637,14 +2637,14 @@ void Executor::bindInstructionConstants(KInstruction *KI) {
 }
 
 void Executor::bindModuleConstants() {
-  for (std::vector<KFunction*>::iterator it = kmodule->functions.begin(), 
-         ie = kmodule->functions.end(); it != ie; ++it) {
-    KFunction *kf = *it;
+  for (auto &kfp : kmodule->functions) {
+    KFunction *kf = kfp.get();
     for (unsigned i=0; i<kf->numInstructions; ++i)
       bindInstructionConstants(kf->instructions[i]);
   }
 
-  kmodule->constantTable = new Cell[kmodule->constants.size()];
+  kmodule->constantTable =
+      std::unique_ptr<Cell[]>(new Cell[kmodule->constants.size()]);
   for (unsigned i=0; i<kmodule->constants.size(); ++i) {
     Cell &c = kmodule->constantTable[i];
     c.value = evalConstant(kmodule->constants[i]);
