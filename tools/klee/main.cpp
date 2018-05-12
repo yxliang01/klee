@@ -1071,6 +1071,8 @@ linkWithUclibc(StringRef libDir,
   for (auto i = newModules, j = modules.size(); i < j; ++i) {
     replaceOrRenameFunction(modules[i].get(), "__libc_open", "open");
     replaceOrRenameFunction(modules[i].get(), "__libc_fcntl", "fcntl");
+
+    // FIXME: yxl: This is a temporary fix
     replaceOrRenameFunction(modules[i].get(), "scanf", "__isoc99_scanf");
   }
 
